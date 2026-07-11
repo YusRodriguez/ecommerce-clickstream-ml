@@ -2,3 +2,5 @@
 .env
 *env
 *pyenv
+__pycache__/
+*.pyc
