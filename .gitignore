@@ -4,3 +4,4 @@
 *pyenv
 __pycache__/
 *.pyc
+*Processed
