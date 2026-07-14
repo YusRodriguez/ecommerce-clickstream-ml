@@ -194,7 +194,6 @@ def reportar_clientes_sesiones(sessions, customers):
     """
     Reporta cuántos clientes no tienen sesiones (sin modificar customers).
     55 clientes (0.28%) están registrados pero nunca generaron sesión.
-    El flag 'tiene_sesion' lo agrega Elías en su módulo.
     """
     print("\n" + "=" * 60)
     print("PASO 2e: Reporte de clientes sin sesiones")
@@ -206,7 +205,7 @@ def reportar_clientes_sesiones(sessions, customers):
     
     print(f"  Clientes con al menos 1 sesión: {len(clientes_con_sesion):,}")
     print(f"  Clientes SIN ninguna sesión: {sin_sesion:,} ({sin_sesion/total_clientes*100:.2f}%)")
-    print("  → No se eliminan ni modifican. El flag 'tiene_sesion' lo agrega Elías.")
+    print("  → No se eliminan ni modifican en este módulo.")
 
 
 def winsorizar_amount_usd(events, percentil=99):
@@ -326,7 +325,7 @@ def corregir_coherencia_temporal(events, sessions, reviews, orders, customers):
     events = events.drop(columns=["signup_date"])
     
     print("\n  ✓ Coherencia temporal corregida en events, sessions y reviews.")
-    print("  → orders y customers se limpian en el módulo de Elías.")
+    print("  → orders y customers se limpian en las funciones correspondientes de este módulo.")
     
     return events, sessions, reviews
 
@@ -423,10 +422,9 @@ def corregir_coherencia_temporal_orders(orders: pd.DataFrame, customers: pd.Data
     """
     Corrige order_time para respetar signup_date <= order_time.
 
-    Mismo criterio y método que el módulo de events/sessions/reviews (Rocío,
-    SRC/data_clean.py en feature/rocio-data-cleaning): las filas violatorias
-    se reasignan a signup_date + offset aleatorio de 0 a 365 días
-    (semilla fija 42, para reproducibilidad).
+    Mismo criterio definido en el EDA general (sección 2.4.1):
+    las filas violatorias se reasignan a signup_date + offset aleatorio
+    de 0 a 365 días (semilla fija 42, para reproducibilidad).
     """
     print("\n--- Corrigiendo coherencia temporal (orders vs customers) ---")
     df = orders.copy()
