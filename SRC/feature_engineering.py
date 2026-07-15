@@ -10,6 +10,13 @@ Función principal: generar_features() ejecuta todo el pipeline.
 """
 import pandas as pd
 import numpy as np
+import sys
+from pathlib import Path
+
+SRC_DIR = Path(__file__).resolve().parent
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 from data_clean import limpiar_tablas
 
 

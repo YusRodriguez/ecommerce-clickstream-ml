@@ -47,7 +47,8 @@ ecommerce-clickstream-ml/
 │   ├── 01_business_understanding.ipynb   # Contexto del negocio y preguntas clave
 │   ├── 02_eda_general.ipynb              # Análisis exploratorio de todas las tablas
 │   ├── 03_data_preparation.ipynb         # Limpieza y validación de los 7 datasets
-│   └── 04_feature_engineering.ipynb      # Construcción de features y matrices de entrada
+│   ├── 04_feature_engineering.ipynb      # Construcción de features y matrices de entrada
+│   └── 05_recommender_model.ipynb        # Entrenamiento y evaluación de modelos de recomendación
 │
 ├── SRC/
 │   ├── utils.py                          # Funciones utilitarias reutilizables
@@ -233,13 +234,54 @@ Sirve para: cold start de clientes nuevos (recomendar basándose en perfil demog
 | `user_features.csv` | 20,000 × 11 | Cold start de clientes nuevos |
 | `user_item_df.csv` | 529,593 × 3 | Análisis y modelos alternativos |
 
-### 5. Modelado *(próximamente)*
+### 5. Modelado
 
-Entrenamiento y evaluación de modelos de recomendación:
-- **Filtrado colaborivo:** SVD y ALS sobre la matriz de interacción
-- **Content-based:** Similitud coseno sobre features de producto
-- **Híbrido:** Combinación de ambos para cubrir cold start y usuarios recurrentes
-- **Métricas:** Precision@K, Recall@K
+**Archivo:** `Notebooks/05_recommender_model.ipynb`
+
+Entrenamiento y evaluación de modelos de recomendación. Se construyen ejemplos positivos (interacciones observadas) y negativos (pares no observados muestreados por popularidad del producto), con split temporal 80/20 para simular predicción de comportamiento futuro. Los features de usuario y producto se recalculan usando solo datos anteriores al corte (anti-leakage).
+
+#### Modelos implementados
+
+| Modelo | Tipo | Enfoque |
+|--------|------|---------|
+| **LightGBM** | Gradient Boosting | Clasificación binaria con features de usuario + producto |
+| **XGBoost** | Gradient Boosting | Clasificación binaria con features de usuario + producto |
+| **CatBoost** | Gradient Boosting | Clasificación binaria con features de usuario + producto |
+| **NGBoost** | Gradient Boosting | Clasificación binaria con features de usuario + producto |
+| **SVD (TruncatedSVD)** | Collaborative Filtering | Factorización de la matriz usuario-item en factores latentes |
+
+Los 4 gradient boosting funcionan como **content-based**: usan las características del producto y del usuario para predecir interacción. El SVD es **collaborative filtering puro**: aprende patrones directamente de la matriz de interacciones.
+
+#### Métricas de evaluación
+
+| Métrica | Tipo | Qué mide |
+|---------|------|----------|
+| Accuracy | Clasificación | Proporción de aciertos globales |
+| Precision | Clasificación | De los predichos como positivos, cuántos lo son |
+| Recall | Clasificación | De los positivos reales, cuántos detectó |
+| F1 | Clasificación | Armónica entre precision y recall |
+| **MAP@K** | **Ranking** | **Precisión promedio entre los K primeros rankeados** |
+| **NDCG@K** | **Ranking** | **Qué tan arriba están los relevantes en el ranking** |
+
+Las métricas de ranking (MAP@K, NDCG@K) son las más relevantes para un sistema de recomendación, ya que miden la calidad del orden de las recomendaciones presentadas al usuario.
+
+#### Resultados (iteración 1)
+
+| Modelo | Accuracy | F1 | MAP@10 | NDCG@10 |
+|--------|----------|-----|--------|---------|
+| LightGBM | 0.4970 | 0.5935 | 0.8754 | 0.9257 |
+| XGBoost | 0.5011 | 0.5975 | 0.8635 | 0.9187 |
+| CatBoost | 0.4981 | 0.5938 | 0.8633 | 0.9185 |
+| NGBoost | 0.4975 | 0.5930 | 0.8650 | 0.9197 |
+| SVD (CF) | 0.3312 | 0.3269 | 0.8260 | 0.8914 |
+
+LightGBM obtiene los mejores resultados en métricas de ranking. El accuracy ~50% es esperado: el dataset es sintético con distribuciones uniformes, lo que reduce el poder predictivo de los features demográficos. Las métricas de ranking confirman que los modelos sí están rankeando correctamente.
+
+#### Pendiente para siguiente iteración
+
+- Modelo híbrido: combinación de collaborative filtering + content-based
+- Optimización de hiperparámetros
+- Evaluación con más usuarios y productos
 
 ---
 
@@ -371,7 +413,7 @@ pip install -r requirements.txt
 **Opción A — Notebooks (recomendado para exploración):**
 
 ```bash
-# Abrir Jupyter y ejecutar en orden: 01 → 02 → 03 → 04
+# Abrir Jupyter y ejecutar en orden: 01 → 02 → 03 → 04 → 05
 jupyter notebook Notebooks/
 ```
 
@@ -413,7 +455,10 @@ interaction_matrix, product_features, user_features, user_item_df, _ = generar_f
 | matplotlib | — | Visualizaciones (dependencia de seaborn) |
 | jupyter / notebook / ipykernel | — | Ejecución de notebooks |
 | ipywidgets | — | Widgets en notebooks |
-| xgboost | 3.2.0 | Modelos (futuro) |
+| xgboost | 3.2.0 | Modelos de gradient boosting |
+| lightgbm | — | Modelo de gradient boosting |
+| catboost | — | Modelo de gradient boosting |
+| ngboost | — | Modelo de boosting probabilístico |
 | fastapi | — | API (futuro) |
 | streamlit | — | Dashboard (futuro) |
 | uvicorn | — | Servidor ASGI (futuro) |
@@ -432,7 +477,7 @@ interaction_matrix, product_features, user_features, user_item_df, _ = generar_f
 - **Corrección temporal:** Se aplicó corrección automática con offset aleatorio (semilla 42 para reproducibilidad). Las fechas corregidas son aproximadas y no representan el comportamiento real de un usuario.
 - **review_text:** Eliminada del dataset. Solo contenía 5 frases fijas repetidas que correspondían 1 a 1 con el rating, por lo que no es utilizable para NLP.
 - **Sparsity alta (97.78%):** La matriz usuario-item es extremadamente dispersa. Los modelos de filtrado colaborivo (SVD/ALS) están diseñados para manejar esto.
-- **Modelado pendiente:** Falta el entrenamiento y evaluación de los modelos de recomendación.
+- **Modelado iteración 1 completado:** Se entrenaron 5 modelos (LightGBM, XGBoost, CatBoost, NGBoost, SVD) con split temporal y métricas de ranking. Falta el modelo híbrido y la optimización de hiperparámetros.
 - **API/Deploy pendiente:** No hay servicio de inferencia ni dashboard implementado aún. Las dependencias (FastAPI, Streamlit, uvicorn) ya están en requirements.txt.
 - **55 clientes inactivos:** Registrados pero sin sesiones. Requieren cold start con features demográficos.
 
@@ -440,8 +485,8 @@ interaction_matrix, product_features, user_features, user_item_df, _ = generar_f
 
 ## Próximos pasos
 
-1. **Entrenamiento de modelos:** SVD, ALS, content-based con similitud coseno
-2. **Evaluación:** Precision@K, Recall@K, comparación de modelos
-3. **Enfoque híbrido:** Combinar filtrado colaborivo + content-based para cubrir cold start
+1. **Modelo híbrido:** Combinar scores de collaborative filtering + content-based
+2. **Optimización de hiperparámetros:** Grid search sobre los modelos con mejores métricas de ranking
+3. **Content-based con similitud coseno:** Explorar enfoque alternativo basado en similitud entre productos
 4. **API de inferencia:** FastAPI con modelo serializado (joblib)
 5. **Dashboard:** Streamlit para visualización de recomendaciones
