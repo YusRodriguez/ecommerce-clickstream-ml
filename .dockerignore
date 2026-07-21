@@ -1,0 +1,4 @@
+Notebooks/
+.git/
+__pycache__/
+.env

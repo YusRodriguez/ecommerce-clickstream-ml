@@ -15,5 +15,8 @@ fastapi
 joblib==1.5.3
 scipy
 streamlit
+scikit-learn
+joblib
+fastapi
 uvicorn
 lightgbm
