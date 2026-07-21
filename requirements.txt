@@ -17,6 +17,6 @@ scipy
 streamlit
 scikit-learn
 joblib
-fastapi
 uvicorn
 lightgbm
+
