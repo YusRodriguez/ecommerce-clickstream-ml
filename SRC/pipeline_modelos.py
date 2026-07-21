@@ -259,7 +259,17 @@ def preparar_datos_modelado():
         "customer_ids_unique": customer_ids_unique,
         "product_ids_unique": product_ids_unique,
         "events_train": events_train,
+
+        # ==================================================
+        # Datos adicionales para la API
+        # ==================================================
+
+         "products": products_raw,
+        "customers": customers_raw,
+        "product_features": product_features_train,
+        "user_features": user_features_train,
     }
+    
 
 
 def entrenar_warm_start(datos):
@@ -427,24 +437,184 @@ def main():
     print("\nEntrenando modelo cold-start (Content-Based Filtering)...")
     artefactos_cold, metrics_cold = entrenar_cold_start(datos)
 
+    # ============================================================
+    # CARGAR DATOS CRUDOS PARA LA INFERENCIA
+    # ============================================================
+
+    products_raw = pd.read_csv(RAW_DIR / "products.csv")
+    customers_raw = pd.read_csv(RAW_DIR / "customers.csv")
+
+    # Renombrar para que coincidan con el modelo
+    user_features_api = (
+        datos["user_features"]
+        .rename(columns={"n_purchases": "n_purchases_user"})
+        .copy()
+    )
+
+    product_features_api = (
+        datos["product_features"]
+        .rename(columns={"n_purchases": "n_purchases_product"})
+        .copy()
+    )
+
+    # ============================================================
+    # CREAR CATÁLOGO DE PRODUCTOS
+    # ============================================================
+
+    catalogo_productos = products_raw[
+        [
+            "product_id",
+            "name",
+            "category",
+            "price_usd",
+            "cost_usd",
+            "margin_usd",
+        ]
+    ].copy()
+
+    catalogo_productos.rename(
+        columns={"name": "product_name"},
+        inplace=True
+    )
+
+    # ============================================================
+    # CREAR BASE DE USUARIOS
+    # ============================================================
+
+    usuarios_db = customers_raw.merge(
+        user_features_api,
+        on="customer_id",
+        how="left"
+    )
+
+
+    # ============================================================
+    # HISTORIAL DE PRODUCTOS POR USUARIO
+    # ============================================================
+
+    historial_usuario = (
+        datos["events_train"]
+        .dropna(subset=["customer_id", "product_id"])
+        .groupby("customer_id")["product_id"]
+        .unique()
+        .apply(list)
+        .to_dict()
+    )
+
+
+    # ============================================================
+    # CATEGORÍA FAVORITA DEL USUARIO
+    # ============================================================
+
+    eventos_categoria = (
+        datos["events_train"]
+        .merge(
+            products_raw[["product_id", "category"]],
+            on="product_id",
+            how="left"
+        )
+    )
+
+    categoria_favorita = (
+        eventos_categoria
+        .groupby("customer_id")["category"]
+        .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else None)
+        .to_dict()
+    )
+
+
+    
+    
+    
+
+    # ============================================================
+    # GUARDAR MODELO WARM START
+    # ============================================================
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    joblib.dump({
+    warm_artifacts = {
+
+        # Modelo
         "modelo": modelo_warm,
+
+        # Preprocesamiento
         "feature_cols": datos["feature_cols"],
         "imputer": datos["imputer"],
         "category_mappings": datos["category_mappings"],
+
+        # Datos para inferencia
+        "products": catalogo_productos,
+        "customers": usuarios_db,
+        "product_features": product_features_api,
+        "user_features": user_features_api,
+
+        "historial_usuario": historial_usuario,
+        "categoria_favorita": categoria_favorita,
+
+
+        # Métricas
         "metrics": metrics_warm,
-    }, MODELS_DIR / "warm_start_lightgbm.joblib")
+    }
 
-    joblib.dump({
+    joblib.dump(
+    warm_artifacts,
+    MODELS_DIR / "warm_start_lightgbm.joblib"
+)
+
+
+    # ============================================================
+    # GUARDAR MODELO COLD START
+    # ============================================================
+
+    cold_artifacts = {
+
         **artefactos_cold,
-        "metrics": metrics_cold,
-    }, MODELS_DIR / "cold_start_content_based.joblib")
 
-    print(f"\nModelos guardados en: {MODELS_DIR}")
-    print("  - warm_start_lightgbm.joblib")
-    print("  - cold_start_content_based.joblib")
+        "products": catalogo_productos,
+        "product_features": product_features_api,
+
+        "metrics": metrics_cold,
+    }
+
+    joblib.dump(
+        cold_artifacts,
+        MODELS_DIR / "cold_start_content_based.joblib"
+    )
+
+    # ============================================================
+    # INFORMACIÓN FINAL
+    # ============================================================
+
+    print("\n" + "=" * 60)
+    print("MODELOS ENTRENADOS CORRECTAMENTE")
+    print("=" * 60)
+
+    print(f"\nModelos guardados en:\n{MODELS_DIR}")
+
+    print("\nArchivos generados:")
+
+    print("   warm_start_lightgbm.joblib")
+    print("      • Modelo LightGBM")
+    print("      • Feature Columns")
+    print("      • Imputer")
+    print("      • Category Mappings")
+    print("      • User Features")
+    print("      • Product Features")
+    print("      • Customers")
+    print("      • Products")
+    print("      • Métricas")
+
+    print()
+
+    print("   cold_start_content_based.joblib")
+    print("      • Product Vectors")
+    print("      • Product Features")
+    print("      • Products")
+    print("      • Calibrador")
+    print("      • Métricas")
+
+    print("\nPipeline finalizado correctamente.")
 
 
 if __name__ == "__main__":
