@@ -48,6 +48,21 @@ def obtener_metricas():
     return None
 
 
+@st.cache_data(ttl=60)
+def obtener_usuario(customer_id):
+    """
+    Consulta los datos reales de un usuario existente.
+    """
+    try:
+        r = requests.get(f"{API_URL}/users/{customer_id}")
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+
+    return None
+
+
 def solicitar_recomendaciones(payload):
     """
     Envía la solicitud de recomendaciones a la API.
@@ -205,11 +220,17 @@ if tipo_usuario == "👤 Usuario con historial":
             value=1
         )
 
+        usuario_real = obtener_usuario(int(customer_id))
+
+        if usuario_real is not None:
+            st.caption("🔒 Edad tomada del historial real del usuario.")
+
         age = st.slider(
             "Edad",
             18,
             80,
-            35
+            int(usuario_real["age"]) if usuario_real else 35,
+            disabled=usuario_real is not None
         )
 
         country = st.selectbox(
