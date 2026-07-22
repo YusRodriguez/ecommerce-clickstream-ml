@@ -15,6 +15,42 @@ st.set_page_config(
 API_URL = "http://127.0.0.1:8000"
 
 # ==========================================================
+# LISTAS COMPARTIDAS DEL FORMULARIO
+# ==========================================================
+
+# Código de país (tal como está en los datos) -> nombre completo
+PAISES = {
+    "JP": "Japón",
+    "IN": "India",
+    "BR": "Brasil",
+    "FR": "Francia",
+    "US": "Estados Unidos",
+    "GB": "Reino Unido",
+    "MX": "México",
+    "AU": "Australia",
+    "SG": "Singapur",
+    "AE": "Emiratos Árabes Unidos",
+    "PL": "Polonia",
+    "CA": "Canadá",
+    "DE": "Alemania",
+    "NL": "Países Bajos",
+    "ES": "España",
+    "SE": "Suecia",
+    "ZA": "Sudáfrica"
+}
+
+CATEGORIAS = [
+    "Todas las categorías",
+    "Electronics",
+    "Home & Kitchen",
+    "Beauty",
+    "Sports",
+    "Fashion",
+    "Books",
+    "Toys"
+]
+
+# ==========================================================
 # FUNCIONES AUXILIARES
 # ==========================================================
 
@@ -55,6 +91,22 @@ def obtener_usuario(customer_id):
     """
     try:
         r = requests.get(f"{API_URL}/users/{customer_id}")
+        if r.status_code == 200:
+            return r.json()
+    except:
+        pass
+
+    return None
+
+
+@st.cache_data(ttl=60)
+def obtener_lista_usuarios():
+    """
+    Obtiene la lista de usuarios con historial de compras
+    (para el selector de usuarios del Warm Start).
+    """
+    try:
+        r = requests.get(f"{API_URL}/users-list")
         if r.status_code == 200:
             return r.json()
     except:
@@ -213,12 +265,24 @@ if tipo_usuario == "👤 Usuario con historial":
 
     with col1:
 
-        customer_id = st.number_input(
-            "Customer ID",
-            min_value=1,
-            step=1,
-            value=1
+        usuarios_lista = obtener_lista_usuarios()
+
+        if not usuarios_lista:
+
+            st.warning("No se pudo obtener la lista de usuarios con historial.")
+            st.stop()
+
+        opciones_usuario = {
+            f"{u['name']} ({u['email']})": u["customer_id"]
+            for u in usuarios_lista
+        }
+
+        seleccion = st.selectbox(
+            "Usuario",
+            list(opciones_usuario.keys())
         )
+
+        customer_id = opciones_usuario[seleccion]
 
         usuario_real = obtener_usuario(int(customer_id))
 
@@ -233,33 +297,28 @@ if tipo_usuario == "👤 Usuario con historial":
             disabled=usuario_real is not None
         )
 
-        country = st.selectbox(
-            "País",
-            [
-                "Argentina",
-                "Brazil",
-                "Chile",
-                "Portugal",
-                "Spain",
-                "USA"
-            ]
+        if usuario_real is not None:
+            st.caption("🔒 País tomado del historial real del usuario.")
+
+        opciones_pais = (
+            {PAISES.get(usuario_real["country"], usuario_real["country"]): usuario_real["country"]}
+            if usuario_real
+            else {nombre: codigo for codigo, nombre in PAISES.items()}
         )
+
+        pais_seleccionado = st.selectbox(
+            "País",
+            list(opciones_pais.keys()),
+            disabled=usuario_real is not None
+        )
+
+        country = opciones_pais[pais_seleccionado]
 
     with col2:
 
         category = st.selectbox(
             "Categoría favorita",
-            [
-                "Todas las categorías",
-                "Electronics",
-                "Home & Kitchen",
-                "Beauty",
-                "Sports",
-                "Fashion",
-                "Books",
-                "Toys"
-                
-            ]
+            CATEGORIAS
         )
 
     if st.button("🚀 Obtener recomendaciones", use_container_width=True):
@@ -307,39 +366,23 @@ else:
 
     with col1:
 
-        age = st.slider(
-            "Edad",
-            18,
-            80,
-            30
+        opciones_pais_cold = {"Todos los países": ""}
+        opciones_pais_cold.update(
+            {nombre: codigo for codigo, nombre in PAISES.items()}
         )
 
-        country = st.selectbox(
+        pais_seleccionado = st.selectbox(
             "País",
-            [
-                "Argentina",
-                "Brazil",
-                "Chile",
-                "Portugal",
-                "Spain",
-                "USA"
-            ]
+            list(opciones_pais_cold.keys())
         )
+
+        country = opciones_pais_cold[pais_seleccionado]
 
     with col2:
 
         category = st.selectbox(
             "Categoría de interés",
-            [
-                "Todas las categorías",
-                "Electronics",
-                "Home & Kitchen",
-                "Beauty",
-                "Sports",
-                "Fashion",
-                "Books",
-                "Toys"
-            ]
+            CATEGORIAS
         )
 
     if st.button("🚀 Obtener recomendaciones", use_container_width=True):
@@ -351,8 +394,6 @@ else:
             "customer_id": -1,
 
             "context": {
-
-                "age": age,
 
                 "country": country,
 

@@ -97,6 +97,59 @@ category_columns = cold_model["category_columns"]
 PERFILES_USUARIO = cold_model["perfiles_usuario"]
 
 # ==========================================================
+# POPULARIDAD POR PAÍS (segmentación del Cold Start)
+# ==========================================================
+# A partir de las órdenes reales, calcula por país cuántas veces
+# se compró cada producto ahí. Un país vacío ("") significa
+# "Todos los países": no se segmenta, se usa la popularidad
+# general del catálogo completo.
+#
+# Nota: la gran mayoría de los productos se vendió alguna vez en
+# casi todos los países (entre el 58% y el 96% del catálogo según
+# el país), así que filtrar solo por "se vendió alguna vez ahí"
+# casi no cambia el top-K frente a "todos los países" -> por eso
+# se usa la CANTIDAD de compras por país como score de ranking,
+# no una simple presencia sí/no.
+
+_orders_pais = pd.read_csv(
+    "Data/Raw/orders.csv",
+    usecols=["order_id", "country"]
+)
+
+_order_items_pais = pd.read_csv(
+    "Data/Raw/order_items.csv",
+    usecols=["order_id", "product_id"]
+)
+
+_ventas_pais = _order_items_pais.merge(
+    _orders_pais,
+    on="order_id",
+    how="inner"
+)
+
+POPULARIDAD_PAIS = {
+
+    pais: grupo.set_index("product_id")["compras"].to_dict()
+
+    for pais, grupo in (
+
+        _ventas_pais
+        .groupby(["country", "product_id"])
+        .size()
+        .rename("compras")
+        .reset_index()
+        .groupby("country")
+
+    )
+
+}
+
+PRODUCTOS_POR_PAIS = {
+    pais: set(int(pid) for pid in popularidad.keys())
+    for pais, popularidad in POPULARIDAD_PAIS.items()
+}
+
+# ==========================================================
 # CATÁLOGO
 # ==========================================================
 CATALOGO = products.copy()
@@ -259,20 +312,12 @@ def recomendar_cold_start(customer_id, context, top_k=10):
 
     perfil_real = PERFILES_USUARIO.get(customer_id)
 
+    sin_categoria = False
+
     if perfil_real is not None:
         vector_usuario = perfil_real.reshape(1, -1)
 
     else:
-        # -----------------------------
-        # Variables numéricas
-        # -----------------------------
-        numeric_values = []
-
-        for col in numeric_cols_content:
-            numeric_values.append(
-                context.get(col, 0)
-            )
-
         # -----------------------------
         # Categoría
         # -----------------------------
@@ -291,12 +336,22 @@ def recomendar_cold_start(customer_id, context, top_k=10):
             else:
                 categoria_vector.append(0)
 
+        # "Todas las categorías": no hay ninguna preferencia de
+        # contenido para comparar (ni categoría ni datos numéricos
+        # reales del usuario anónimo).
+        sin_categoria = not any(categoria_vector)
+
         # -----------------------------
-        # Escalado
+        # Numérico
         # -----------------------------
-        numeric_scaled = scaler.transform(
-            np.array(numeric_values).reshape(1, -1)
-        )
+        # Un usuario anónimo no tiene señales numéricas reales
+        # (país y categoría no son features del vector de contenido).
+        # Se usa el perfil neutro/promedio del catálogo (0 en el
+        # espacio ya escalado) para que sea la categoría la que
+        # oriente la recomendación, en vez de escalar un 0 crudo
+        # (que se traduce en un vector muy alejado del promedio
+        # y termina dominando la similaridad).
+        numeric_scaled = np.zeros((1, len(numeric_cols_content)))
 
         vector_usuario = np.hstack([
 
@@ -307,14 +362,57 @@ def recomendar_cold_start(customer_id, context, top_k=10):
         ])
 
     # -----------------------------
-    # Similaridad
+    # Similaridad / Popularidad + Segmentación por país
     # -----------------------------
-    similitudes = cosine_similarity(
-        vector_usuario,
-        product_vectors
-    )[0]
+    # País vacío ("Todos los países") -> sin segmentar.
+    pais = context.get("country")
 
-    mejores = np.argsort(similitudes)[::-1][:top_k]
+    if sin_categoria:
+
+        # Sin ninguna preferencia de contenido, la similaridad de
+        # coseno contra un vector nulo no aporta orden real: se
+        # recomienda directamente por popularidad.
+        popularidad_pais = POPULARIDAD_PAIS.get(pais) if pais else None
+
+        if popularidad_pais:
+
+            # Popularidad real DE ESE país (cantidad de compras ahí),
+            # no la popularidad general del catálogo.
+            similitudes = np.array([
+                popularidad_pais.get(int(pid), 0)
+                for pid in product_ids
+            ])
+
+        else:
+            idx_popularidad = numeric_cols_content.index("popularidad")
+            similitudes = product_vectors[:, idx_popularidad]
+
+        indices_candidatos = list(range(len(product_ids)))
+
+    else:
+
+        similitudes = cosine_similarity(
+            vector_usuario,
+            product_vectors
+        )[0]
+
+        productos_pais = PRODUCTOS_POR_PAIS.get(pais) if pais else None
+
+        if productos_pais:
+
+            indices_candidatos = [
+                i for i, pid in enumerate(product_ids)
+                if int(pid) in productos_pais
+            ]
+
+        else:
+            indices_candidatos = list(range(len(product_ids)))
+
+    similitudes_candidatas = similitudes[indices_candidatos]
+
+    mejores_local = np.argsort(similitudes_candidatas)[::-1][:top_k]
+
+    mejores = [indices_candidatos[i] for i in mejores_local]
 
     recomendaciones = []
 
@@ -663,6 +761,34 @@ def user(customer_id: int):
         )
 
     return obtener_usuario(customer_id)
+
+
+@app.get("/users-list")
+def users_list():
+
+    """
+    Devuelve los usuarios con historial de compras
+    (customer_id, name, email) para poblar el selector
+    de usuarios del frontend.
+    """
+
+    usuarios_con_compras = customers[customers["n_purchases_user"] > 0]
+
+    resultado = []
+
+    for _, fila in usuarios_con_compras.iterrows():
+
+        resultado.append({
+
+            "customer_id": int(fila["customer_id"]),
+
+            "name": fila["name"],
+
+            "email": fila["email"]
+
+        })
+
+    return resultado
 
 
 # ==========================================================
