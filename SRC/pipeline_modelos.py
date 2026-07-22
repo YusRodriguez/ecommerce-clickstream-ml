@@ -36,9 +36,9 @@ PROJECT_DIR = SRC_DIR.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from data_clean import limpiar_tablas
 from feature_engineering import crear_features_producto, crear_features_usuario, generar_features
 
-RAW_DIR = PROJECT_DIR / "Data" / "Raw"
 MODELS_DIR = PROJECT_DIR / "Models"
 
 TOP_K = 10
@@ -88,14 +88,10 @@ def rank_metrics_por_usuario(df_scores, top_k=TOP_K):
     }
 
 
-def _cargar_datos_crudos():
-    products_raw = pd.read_csv(RAW_DIR / "products.csv")
-    customers_raw = pd.read_csv(RAW_DIR / "customers.csv")
-    sessions_raw = pd.read_csv(RAW_DIR / "sessions.csv", parse_dates=["start_time"])
-    orders_raw = pd.read_csv(RAW_DIR / "orders.csv", parse_dates=["order_time"])
-    order_items_raw = pd.read_csv(RAW_DIR / "order_items.csv")
-    reviews_raw = pd.read_csv(RAW_DIR / "reviews.csv", parse_dates=["review_time"])
-    return products_raw, customers_raw, sessions_raw, orders_raw, order_items_raw, reviews_raw
+def _cargar_datos_limpios():
+    """Mismas tablas limpias que usa generar_features() (via limpiar_tablas)."""
+    events, sessions, reviews, orders, order_items, customers, products = limpiar_tablas()
+    return products, customers, sessions, orders, order_items, reviews
 
 
 def _split_temporal(user_item_df, events_con_user, train_frac=0.8):
@@ -152,7 +148,7 @@ def preparar_datos_modelado():
     interaction_matrix, product_features, user_features, user_item_df, events_con_user = generar_features()
     events_con_user["timestamp"] = pd.to_datetime(events_con_user["timestamp"])
 
-    products_raw, customers_raw, sessions_raw, orders_raw, order_items_raw, reviews_raw = _cargar_datos_crudos()
+    products_raw, customers_raw, sessions_raw, orders_raw, order_items_raw, reviews_raw = _cargar_datos_limpios()
 
     positive_pairs, train_positive, test_positive, cutoff = _split_temporal(user_item_df, events_con_user)
 
@@ -385,6 +381,16 @@ def entrenar_cold_start(datos):
 
     content_scores_matrix = cosine_similarity(perfil_usuario, product_vectors)
 
+    # Perfiles reales (solo para usuarios con al menos una interacción en train)
+    # para que la API pueda usar el historial real de un usuario en vez de
+    # depender de un vector armado a mano con lo que venga en el request.
+    tiene_interacciones = peso_usuario_sum > 0
+    perfiles_usuario = {
+        int(cid): vec
+        for cid, vec, hay_historial in zip(customer_ids_unique, perfil_usuario, tiene_interacciones)
+        if hay_historial
+    }
+
     def score_content(customer_id, product_id):
         i, j = customer_index.get(customer_id), product_index.get(product_id)
         if i is None or j is None:
@@ -423,6 +429,7 @@ def entrenar_cold_start(datos):
         "product_vectors": product_vectors,
         "product_ids": product_ids_unique,
         "calibrador": calibrador_content,
+        "perfiles_usuario": perfiles_usuario,
     }
     return artefactos, metrics
 
@@ -438,11 +445,11 @@ def main():
     artefactos_cold, metrics_cold = entrenar_cold_start(datos)
 
     # ============================================================
-    # CARGAR DATOS CRUDOS PARA LA INFERENCIA
+    # DATOS LIMPIOS PARA LA INFERENCIA (ya calculados en preparar_datos_modelado)
     # ============================================================
 
-    products_raw = pd.read_csv(RAW_DIR / "products.csv")
-    customers_raw = pd.read_csv(RAW_DIR / "customers.csv")
+    products_raw = datos["products"]
+    customers_raw = datos["customers"]
 
     # Renombrar para que coincidan con el modelo
     user_features_api = (

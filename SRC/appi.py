@@ -94,6 +94,8 @@ numeric_cols_content = cold_model["numeric_cols"]
 
 category_columns = cold_model["category_columns"]
 
+PERFILES_USUARIO = cold_model["perfiles_usuario"]
+
 # ==========================================================
 # CATÁLOGO
 # ==========================================================
@@ -244,54 +246,65 @@ def obtener_nombre_producto(product_id):
 # COLD START
 # ==========================================================
 
-def recomendar_cold_start(context, top_k=10):
+def recomendar_cold_start(customer_id, context, top_k=10):
     """
-    Recomendación para usuarios nuevos utilizando
+    Recomendación para usuarios sin compras utilizando
     Content-Based Filtering.
+
+    Si el usuario tiene historial real de interacción (vistas/carrito) desde
+    el período de entrenamiento, se usa su perfil real (PERFILES_USUARIO).
+    Si no hay ningún registro de ese usuario, se arma un vector a mano con
+    lo que venga en `context`.
     """
 
-    # -----------------------------
-    # Variables numéricas
-    # -----------------------------
-    numeric_values = []
+    perfil_real = PERFILES_USUARIO.get(customer_id)
 
-    for col in numeric_cols_content:
-        numeric_values.append(
-            context.get(col, 0)
+    if perfil_real is not None:
+        vector_usuario = perfil_real.reshape(1, -1)
+
+    else:
+        # -----------------------------
+        # Variables numéricas
+        # -----------------------------
+        numeric_values = []
+
+        for col in numeric_cols_content:
+            numeric_values.append(
+                context.get(col, 0)
+            )
+
+        # -----------------------------
+        # Categoría
+        # -----------------------------
+        categoria = context.get(
+            "category",
+            "missing"
         )
 
-    # -----------------------------
-    # Categoría
-    # -----------------------------
-    categoria = context.get(
-        "category",
-        "missing"
-    )
+        categoria_vector = []
 
-    categoria_vector = []
+        for col in category_columns:
 
-    for col in category_columns:
+            if col == f"cat_{categoria}":
+                categoria_vector.append(1)
 
-        if col == f"cat_{categoria}":
-            categoria_vector.append(1)
+            else:
+                categoria_vector.append(0)
 
-        else:
-            categoria_vector.append(0)
+        # -----------------------------
+        # Escalado
+        # -----------------------------
+        numeric_scaled = scaler.transform(
+            np.array(numeric_values).reshape(1, -1)
+        )
 
-    # -----------------------------
-    # Escalado
-    # -----------------------------
-    numeric_scaled = scaler.transform(
-        np.array(numeric_values).reshape(1, -1)
-    )
+        vector_usuario = np.hstack([
 
-    vector_usuario = np.hstack([
+            numeric_scaled,
 
-        numeric_scaled,
+            np.array(categoria_vector).reshape(1, -1)
 
-        np.array(categoria_vector).reshape(1, -1)
-
-    ])
+        ])
 
     # -----------------------------
     # Similaridad
@@ -570,6 +583,8 @@ def recommend(request: RecommendationRequest):
         # ---------------------------------------
 
         recomendaciones = recomendar_cold_start(
+
+            request.customer_id,
 
             request.context,
 
