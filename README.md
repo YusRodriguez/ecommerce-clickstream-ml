@@ -89,7 +89,7 @@ Proyecto desarrollado como parte del **Bootcamp de Data Science de Henry**, apli
 
 | Integrante | Rol y participación |
 |------------|---------------------|
-| **Yustin Rodríguez** | Líder del proyecto. Coordinación general, arquitectura de la solución, integración del repositorio, desarrollo del pipeline de datos, Backend (FastAPI), Frontend (Streamlit), Dashboard en Power BI, despliegue y documentación técnica. |
+| **Yustin Rodríguez** | Coordinación general, Scrum Master, arquitectura de la solución, integración del repositorio, desarrollo del pipeline de datos, Backend (FastAPI), Frontend (Streamlit), Dashboard en Power BI, despliegue y documentación técnica. |
 | **Elías Mana** | Desarrollo, entrenamiento, optimización y evaluación de los modelos de Machine Learning utilizados por el sistema de recomendación. |
 | **Carina Belén** | Análisis exploratorio de datos (EDA), análisis de negocio, documentación funcional y validación de resultados. |
 | **Rocío Muñoz** | Preparación y limpieza de datos, apoyo al análisis exploratorio (EDA), desarrollo de componentes del proyecto y aseguramiento de la calidad de los datos. |
