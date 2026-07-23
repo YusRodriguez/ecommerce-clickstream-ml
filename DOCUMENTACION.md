@@ -51,11 +51,11 @@ flowchart TB
     end
 ```
 
-### Entrenamiento e inferencia, desacoplados
+### Entrenamiento e inferencia
 
-Entrenar un modelo y servirlo son dos procesos separados. `pipeline_modelos.py` corre de forma independiente, entrena y serializa con `joblib`; la API (`SRC/appi.py`) simplemente carga esos artefactos al arrancar y los mantiene en memoria mientras atiende requests, sin volver a entrenar nada en el camino.
+El proceso de entrenamiento y el servicio de recomendaciones se ejecutan de forma independiente. Durante el entrenamiento, `pipeline_modelos.py` genera los modelos y los serializa en archivos `.joblib`. Posteriormente, la API (`SRC/appi.py`) carga estos artefactos al iniciar la aplicación y los utiliza para atender las solicitudes de recomendación.
 
-Esto tiene una consecuencia práctica: si cambian los datos de entrada o el pipeline de entrenamiento, hay que correr `pipeline_modelos.py` de nuevo, regenerar los `.joblib` y actualizar la API con esa nueva versión. Las actualizaciones de modelo son manuales — el reentrenamiento incremental y la recarga dinámica quedan como posibles extensiones futuras.
+Cuando se actualizan los datos o se realizan cambios en el pipeline de entrenamiento, es necesario ejecutar nuevamente `pipeline_modelos.py` para generar una nueva versión de los modelos. Una vez creados los nuevos artefactos, estos pueden ser utilizados por la API para ofrecer recomendaciones basadas en la versión más reciente del modelo.
 
 ---
 
