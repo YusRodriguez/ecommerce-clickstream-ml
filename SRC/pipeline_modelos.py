@@ -215,6 +215,7 @@ def preparar_datos_modelado():
             how="left"
         )
     )
+    events_with_cat["category"] = events_with_cat["category"].astype(str).str.lower().str.strip()
 
     evt_weights = {"page_view": 1, "add_to_cart": 3, "purchase": 5}
     events_with_cat["event_weight"] = events_with_cat["event_type"].map(evt_weights).fillna(1)
@@ -248,6 +249,8 @@ def preparar_datos_modelado():
     def construir_features(pares_df):
         df = pares_df.merge(user_features_model, on="customer_id", how="left")
         df = df.merge(product_features_model, on="product_id", how="left")
+        if "category" in df.columns:
+            df["category"] = df["category"].astype(str).str.lower().str.strip()
         df = df.merge(user_cat_stats, on=["customer_id", "category"], how="left")
         return df
 
@@ -568,6 +571,37 @@ def main():
         .to_dict()
     )
 
+    # ============================================================
+    # HISTORIAL DETALLADO DE INTERACCIONES POR USUARIO
+    # ============================================================
+
+    events_det = datos["events_train"].dropna(subset=["customer_id", "product_id"]).copy()
+    events_det["customer_id"] = events_det["customer_id"].astype(int)
+    events_det["product_id"] = events_det["product_id"].astype(int)
+
+    events_det = events_det.merge(
+        products_raw[["product_id", "category", "price_usd"]],
+        on="product_id", how="left"
+    )
+
+    EVENT_LABELS = {"page_view": "Visto", "add_to_cart": "Carrito", "purchase": "Comprado"}
+
+    historial_detallado = {}
+    for cid, grupo in events_det.groupby("customer_id"):
+        interacciones = []
+        for _, row in grupo.iterrows():
+            pid = int(row["product_id"])
+            match = catalogo_productos.loc[catalogo_productos["product_id"] == pid, "product_name"]
+            pname = match.iloc[0] if len(match) > 0 else "Producto"
+            interacciones.append({
+                "product_id": pid,
+                "product_name": pname,
+                "category": str(row["category"]),
+                "event_type": EVENT_LABELS.get(str(row["event_type"]), str(row["event_type"])),
+                "price_usd": round(float(row.get("price_usd", 0)), 2),
+            })
+        historial_detallado[int(cid)] = interacciones
+
 
     # ============================================================
     # CATEGORÍA FAVORITA DEL USUARIO
@@ -665,6 +699,7 @@ def main():
         "user_features": user_features_api,
 
         "historial_usuario": historial_usuario,
+        "historial_detallado": historial_detallado,
         "categoria_favorita": categoria_favorita,
         "preferencias_categoria": pref_dict,
         "user_cat_stats": datos["user_cat_stats"],

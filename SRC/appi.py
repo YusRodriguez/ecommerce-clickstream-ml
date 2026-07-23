@@ -48,11 +48,16 @@ except Exception as e:
 
 HISTORIAL_USUARIO = warm_model["historial_usuario"]
 
+HISTORIAL_DETALLADO = warm_model.get("historial_detallado", {})
+
 CATEGORIA_FAVORITA = warm_model["categoria_favorita"]
 
 PREFERENCIAS_CATEGORIA = warm_model.get("preferencias_categoria", {})
 
 USER_CAT_STATS = warm_model.get("user_cat_stats", pd.DataFrame())
+
+if not USER_CAT_STATS.empty and "category" in USER_CAT_STATS.columns:
+    USER_CAT_STATS["category"] = USER_CAT_STATS["category"].astype(str).str.lower().str.strip()
 
 ALPHA_BOOST = 0.3
 
@@ -72,6 +77,9 @@ scaler_products = warm_model["scaler_products"]
 product_numeric_cols = warm_model["product_numeric_cols"]
 
 category_mappings = warm_model["category_mappings"]
+
+for _col, _meta in category_mappings.items():
+    _meta["mapping"] = {k.lower().strip() if isinstance(k, str) else k: v for k, v in _meta["mapping"].items()}
 
 # ==========================================================
 # DECODIFICACIÓN DE COUNTRY
@@ -276,6 +284,11 @@ def obtener_usuario(customer_id: int):
                 str(country_encoded)
             )
 
+        fila = customers[customers["customer_id"] == customer_id]
+        if not fila.empty:
+            usuario["name"] = fila.iloc[0].get("name", "")
+            usuario["email"] = fila.iloc[0].get("email", "")
+
     return usuario
 
 
@@ -450,11 +463,21 @@ def recomendar_cold_start(customer_id, context, top_k=10):
 
         pid = int(product_ids[indice])
 
+        fila_cat = CATALOGO[CATALOGO["product_id"] == pid]
+
+        cat = fila_cat["category"].values[0] if not fila_cat.empty else ""
+
+        precio = round(float(fila_cat["price_usd"].values[0]), 2) if not fila_cat.empty else 0.0
+
         recomendaciones.append({
 
             "product_id": pid,
 
             "product_name": obtener_nombre_producto(pid),
+
+            "category": cat,
+
+            "price": precio,
 
             "score": float(similitudes[indice])
 
@@ -536,6 +559,10 @@ def recomendar_cold_start_demographic(context, top_k=10):
 
     for pid, frecuencia in productos_ordenados[:top_k]:
 
+        fila_cat = CATALOGO[CATALOGO["product_id"] == pid]
+
+        precio = round(float(fila_cat["price_usd"].values[0]), 2) if not fila_cat.empty else 0.0
+
         recomendaciones.append({
 
             "product_id": pid,
@@ -545,6 +572,8 @@ def recomendar_cold_start_demographic(context, top_k=10):
             "category": CATALOGO[
                 CATALOGO["product_id"] == pid
             ]["category"].values[0] if pid in CATALOGO["product_id"].values else "",
+
+            "price": precio,
 
             "score": round(frecuencia / len(usuarios_similares), 4),
 
@@ -830,6 +859,28 @@ def recommend(request: RecommendationRequest):
 
             usuario = obtener_usuario(request.customer_id)
 
+            prefs_usuario = PREFERENCIAS_CATEGORIA.get(request.customer_id, {})
+
+            categorias_ordenadas = sorted(
+                prefs_usuario.items(), key=lambda x: x[1], reverse=True
+            )
+
+            usuario_info = {}
+            if usuario:
+                usuario_info = {
+                    "customer_id": request.customer_id,
+                    "name": usuario.get("name", ""),
+                    "email": usuario.get("email", ""),
+                    "age": usuario.get("age", 0),
+                    "country": usuario.get("country", ""),
+                    "n_sessions": int(usuario.get("n_sessions", 0)),
+                    "n_purchases": int(usuario.get("n_purchases_user", 0)),
+                    "ticket_promedio": round(float(usuario.get("ticket_promedio", 0)), 2),
+                    "n_products_viewed": int(usuario.get("n_products_viewed", 0)),
+                    "n_products_carted": int(usuario.get("n_products_carted", 0)),
+                    "rating_promedio_usr": round(float(usuario.get("rating_promedio_usr", 0)), 2),
+                }
+
             return {
 
                 "customer_id": request.customer_id,
@@ -838,7 +889,12 @@ def recommend(request: RecommendationRequest):
 
                 "usuario_con_historial": True,
 
-                "historial": usuario,
+                "usuario": usuario_info,
+
+                "categorias_preferidas": [
+                    {"category": cat, "peso": round(peso, 4)}
+                    for cat, peso in categorias_ordenadas
+                ],
 
                 "recommendations": recomendaciones
 
@@ -888,6 +944,19 @@ def recommend(request: RecommendationRequest):
 
             modelo_usado = "Cold Start (Content Based)"
 
+        prefs_cold = PREFERENCIAS_CATEGORIA.get(request.customer_id, {})
+        categorias_cold = sorted(prefs_cold.items(), key=lambda x: x[1], reverse=True)
+
+        usuario_cold = obtener_usuario(request.customer_id)
+        usuario_cold_info = {}
+        if usuario_cold:
+            usuario_cold_info = {
+                "customer_id": request.customer_id,
+                "name": usuario_cold.get("name", ""),
+                "age": usuario_cold.get("age", 0),
+                "country": usuario_cold.get("country", ""),
+            }
+
         return {
 
             "customer_id": request.customer_id,
@@ -895,6 +964,13 @@ def recommend(request: RecommendationRequest):
             "modelo": modelo_usado,
 
             "usuario_con_historial": False,
+
+            "usuario": usuario_cold_info,
+
+            "categorias_preferidas": [
+                {"category": cat, "peso": round(peso, 4)}
+                for cat, peso in categorias_cold
+            ],
 
             "recommendations": recomendaciones
 
