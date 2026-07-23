@@ -51,6 +51,8 @@ FEATURE_COLS = [
     "n_products_viewed", "n_products_carted", "rating_promedio_usr",
     "price_usd", "cost_usd", "margin_usd", "popularidad", "rating_promedio", "n_views",
     "n_cart", "n_purchases_product", "n_ratings", "category",
+    "user_cat_n_views", "user_cat_n_cart", "user_cat_n_purchases",
+    "user_cat_total_score", "user_cat_score_ratio",
 ]
 NUMERIC_COLS_CONTENT = [
     "price_usd", "cost_usd", "margin_usd", "popularidad",
@@ -200,9 +202,53 @@ def preparar_datos_modelado():
     user_features_model = user_features_train.rename(columns={"n_purchases": "n_purchases_user"})
     product_features_model = product_features_train.rename(columns={"n_purchases": "n_purchases_product"})
 
+    # =====================================================
+    # Stats de interacción usuario-categoría (solo train)
+    # =====================================================
+
+    events_with_cat = (
+        events_train
+        .dropna(subset=["customer_id", "product_id"])
+        .merge(
+            products_raw[["product_id", "category"]],
+            on="product_id",
+            how="left"
+        )
+    )
+
+    evt_weights = {"page_view": 1, "add_to_cart": 3, "purchase": 5}
+    events_with_cat["event_weight"] = events_with_cat["event_type"].map(evt_weights).fillna(1)
+
+    user_cat_stats = (
+        events_with_cat
+        .groupby(["customer_id", "category"])
+        .agg(
+            user_cat_n_views=("event_type", lambda x: (x == "page_view").sum()),
+            user_cat_n_cart=("event_type", lambda x: (x == "add_to_cart").sum()),
+            user_cat_n_purchases=("event_type", lambda x: (x == "purchase").sum()),
+            user_cat_total_score=("event_weight", "sum"),
+        )
+        .reset_index()
+    )
+
+    user_total_scores = (
+        user_cat_stats
+        .groupby("customer_id")["user_cat_total_score"]
+        .sum()
+        .rename("user_total_score")
+    )
+    user_cat_stats = user_cat_stats.merge(user_total_scores, on="customer_id", how="left")
+    user_cat_stats["user_cat_score_ratio"] = (
+        user_cat_stats["user_cat_total_score"] / user_cat_stats["user_total_score"].replace(0, 1)
+    )
+    user_cat_stats = user_cat_stats.drop(columns=["user_total_score"])
+
+    print(f"  User-category stats: {len(user_cat_stats):,} pares (user, category)")
+
     def construir_features(pares_df):
         df = pares_df.merge(user_features_model, on="customer_id", how="left")
         df = df.merge(product_features_model, on="product_id", how="left")
+        df = df.merge(user_cat_stats, on=["customer_id", "category"], how="left")
         return df
 
     train_df = construir_features(train_pairs)
@@ -234,6 +280,15 @@ def preparar_datos_modelado():
     X_train = pd.DataFrame(imputer.fit_transform(X_train), columns=feature_cols, index=X_train.index)
     X_test = pd.DataFrame(imputer.transform(X_test), columns=feature_cols, index=X_test.index)
 
+    product_numeric_cols = [
+        c for c in ["price_usd", "cost_usd", "margin_usd", "popularidad",
+                     "rating_promedio", "n_views", "n_cart", "n_purchases_product", "n_ratings"]
+        if c in feature_cols
+    ]
+    scaler_products = StandardScaler()
+    X_train[product_numeric_cols] = scaler_products.fit_transform(X_train[product_numeric_cols])
+    X_test[product_numeric_cols] = scaler_products.transform(X_test[product_numeric_cols])
+
     sample_weight_train = compute_sample_weight(class_weight="balanced", y=y_train)
 
     print("Tamaño train:", X_train.shape, "| Tamaño test:", X_test.shape)
@@ -246,6 +301,8 @@ def preparar_datos_modelado():
         "sample_weight_train": sample_weight_train,
         "feature_cols": feature_cols,
         "imputer": imputer,
+        "scaler_products": scaler_products,
+        "product_numeric_cols": product_numeric_cols,
         "category_mappings": category_mappings,
         "train_df": train_df,
         "test_df": test_df,
@@ -255,6 +312,7 @@ def preparar_datos_modelado():
         "customer_ids_unique": customer_ids_unique,
         "product_ids_unique": product_ids_unique,
         "events_train": events_train,
+        "user_cat_stats": user_cat_stats,
 
         # ==================================================
         # Datos adicionales para la API
@@ -488,7 +546,9 @@ def main():
     # CREAR BASE DE USUARIOS
     # ============================================================
 
-    usuarios_db = customers_raw.merge(
+    usuarios_db = customers_raw[
+        ["customer_id", "name", "email", "signup_date"]
+    ].merge(
         user_features_api,
         on="customer_id",
         how="left"
@@ -535,6 +595,52 @@ def main():
     
 
     # ============================================================
+    # PREFERENCIAS DE CATEGORÍA POR USUARIO (para boost en inferencia)
+    # ============================================================
+
+    EVENT_WEIGHTS_CAT = {"page_view": 1, "add_to_cart": 3, "purchase": 5}
+
+    eventos_con_categoria = (
+        datos["events_train"]
+        .dropna(subset=["customer_id", "product_id"])
+        .merge(
+            products_raw[["product_id", "category"]],
+            on="product_id",
+            how="left"
+        )
+    )
+    eventos_con_categoria["weight"] = eventos_con_categoria["event_type"].map(EVENT_WEIGHTS_CAT).fillna(1)
+
+    preferencias_categoria = (
+        eventos_con_categoria
+        .groupby(["customer_id", "category"])["weight"]
+        .sum()
+        .reset_index()
+    )
+
+    pref_dict = {}
+    for _, row in preferencias_categoria.iterrows():
+        cid = int(row["customer_id"])
+        cat = str(row["category"]).lower().strip()
+        if cid not in pref_dict:
+            pref_dict[cid] = {}
+        pref_dict[cid][cat] = float(row["weight"])
+
+    # Normalizar: dividir por el total de cada usuario para obtener proporciones
+    for cid in pref_dict:
+        total = sum(pref_dict[cid].values())
+        if total > 0:
+            pref_dict[cid] = {k: v / total for k, v in pref_dict[cid].items()}
+
+    # ============================================================
+    # REVERSE COUNTRY MAPPING (para decodificar en la API)
+    # ============================================================
+
+    country_mapping = datos["category_mappings"]["country"]["mapping"]
+
+    reverse_country_mapping = {v: k for k, v in country_mapping.items()}
+
+    # ============================================================
     # GUARDAR MODELO WARM START
     # ============================================================
 
@@ -548,6 +654,8 @@ def main():
         # Preprocesamiento
         "feature_cols": datos["feature_cols"],
         "imputer": datos["imputer"],
+        "scaler_products": datos["scaler_products"],
+        "product_numeric_cols": datos["product_numeric_cols"],
         "category_mappings": datos["category_mappings"],
 
         # Datos para inferencia
@@ -558,7 +666,11 @@ def main():
 
         "historial_usuario": historial_usuario,
         "categoria_favorita": categoria_favorita,
+        "preferencias_categoria": pref_dict,
+        "user_cat_stats": datos["user_cat_stats"],
 
+        # Decodificación
+        "reverse_country_mapping": reverse_country_mapping,
 
         # Métricas
         "metrics": metrics_warm,

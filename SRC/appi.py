@@ -50,6 +50,12 @@ HISTORIAL_USUARIO = warm_model["historial_usuario"]
 
 CATEGORIA_FAVORITA = warm_model["categoria_favorita"]
 
+PREFERENCIAS_CATEGORIA = warm_model.get("preferencias_categoria", {})
+
+USER_CAT_STATS = warm_model.get("user_cat_stats", pd.DataFrame())
+
+ALPHA_BOOST = 0.3
+
 
 # ==========================================================
 # WARM START
@@ -61,7 +67,17 @@ feature_cols = warm_model["feature_cols"]
 
 imputer = warm_model["imputer"]
 
+scaler_products = warm_model["scaler_products"]
+
+product_numeric_cols = warm_model["product_numeric_cols"]
+
 category_mappings = warm_model["category_mappings"]
+
+# ==========================================================
+# DECODIFICACIÓN DE COUNTRY
+# ==========================================================
+
+REVERSE_COUNTRY_MAPPING = warm_model.get("reverse_country_mapping", {})
 
 # ==========================================================
 # DATOS NECESARIOS PARA LA INFERENCIA
@@ -194,7 +210,7 @@ PRODUCTOS_DB = (
 
     .merge(
 
-        products,
+        products.drop(columns=["category", "price_usd", "cost_usd", "margin_usd"], errors="ignore"),
 
         on="product_id",
 
@@ -232,6 +248,10 @@ class RecommendationRequest(BaseModel):
 
     context: dict = {}
 
+    country: str = None
+
+    age: int = None
+
 # ==========================================================
 # FUNCIONES AUXILIARES
 # ==========================================================
@@ -243,7 +263,20 @@ def usuario_existe(customer_id: int):
 
 def obtener_usuario(customer_id: int):
 
-    return USUARIOS_DB.get(customer_id)
+    usuario = USUARIOS_DB.get(customer_id)
+
+    if usuario is not None:
+
+        country_encoded = usuario.get("country")
+
+        if country_encoded is not None and isinstance(country_encoded, (int, float)):
+
+            usuario["country"] = REVERSE_COUNTRY_MAPPING.get(
+                int(country_encoded),
+                str(country_encoded)
+            )
+
+    return usuario
 
 
 def tiene_compras(customer_id: int):
@@ -269,17 +302,14 @@ def obtener_candidatos(customer_id, context):
         ~candidatos.product_id.isin(vistos)
     ]
 
-    categoria = context.get("category")
-
-    if not categoria:
-        categoria = CATEGORIA_FAVORITA.get(customer_id)
-
-    if categoria:
-        categoria = categoria.lower().strip()
-
-        candidatos = candidatos[
-            candidatos["category"] == categoria
-        ]
+    prefs = PREFERENCIAS_CATEGORIA.get(customer_id, {})
+    if prefs:
+        top_cats = sorted(prefs.keys(), key=lambda c: prefs[c], reverse=True)[:4]
+        candidatos_pref = candidatos[candidatos["category"].isin(top_cats)]
+        if len(candidatos_pref) >= 10:
+            candidatos = candidatos_pref
+        else:
+            candidatos = candidatos
 
     return candidatos
 
@@ -434,6 +464,99 @@ def recomendar_cold_start(customer_id, context, top_k=10):
 
 
 # ==========================================================
+# COLD START - DEMOGRAPHIC COLLABORATIVE FILTERING
+# ==========================================================
+
+def recomendar_cold_start_demographic(context, top_k=10):
+    """
+    Recomendación para usuarios anónimos (sin perfil en PERFILES_USUARIO)
+    basada en usuarios similares por demographics.
+
+    Busca usuarios del mismo país y rango etario (±5 años) que tengan
+    compras, y recomienda los productos que más compraron entre ellos.
+    Si se especifica una categoría, filtra solo productos de esa categoría.
+    """
+    age = context.get("age")
+    country = context.get("country")
+    category = context.get("category", "").strip().lower()
+
+    if age is None or not country:
+        return []
+
+    age = int(age)
+
+    usuarios_similares = []
+
+    for uid, udata in USUARIOS_DB.items():
+
+        if udata.get("n_purchases_user", 0) <= 0:
+            continue
+
+        if udata.get("country") != country:
+            continue
+
+        user_age = int(udata.get("age", 0))
+
+        if abs(user_age - age) <= 5:
+            usuarios_similares.append(uid)
+
+    if not usuarios_similares:
+        return []
+
+    productos_frecuencia = {}
+
+    for uid in usuarios_similares:
+
+        productos_vistos = HISTORIAL_USUARIO.get(uid, [])
+
+        for pid in productos_vistos:
+
+            pid = int(pid)
+
+            if category:
+                cat_producto = CATALOGO[
+                    CATALOGO["product_id"] == pid
+                ]["category"].values
+
+                if len(cat_producto) == 0 or cat_producto[0] != category:
+                    continue
+
+            if pid not in productos_frecuencia:
+                productos_frecuencia[pid] = 0
+
+            productos_frecuencia[pid] += 1
+
+    productos_ordenados = sorted(
+        productos_frecuencia.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    recomendaciones = []
+
+    for pid, frecuencia in productos_ordenados[:top_k]:
+
+        recomendaciones.append({
+
+            "product_id": pid,
+
+            "product_name": obtener_nombre_producto(pid),
+
+            "category": CATALOGO[
+                CATALOGO["product_id"] == pid
+            ]["category"].values[0] if pid in CATALOGO["product_id"].values else "",
+
+            "score": round(frecuencia / len(usuarios_similares), 4),
+
+            "reason": f"Popular entre {len(usuarios_similares)} usuarios de {country} de {age} años"
+                      + (f" en {context.get('category', '')}" if category else "")
+
+        })
+
+    return recomendaciones
+
+
+# ==========================================================
 # WARM START
 # ==========================================================
 
@@ -459,11 +582,7 @@ def recomendar_warm_start(customer_id, context, top_k=10):
        customer_id,
        context
     )
-    print("Cantidad de candidatos:", len(productos_candidatos))
-    print(productos_candidatos[["product_id", "category"]].head())
 
-    # Si ya compró todo en su categoría favorita,
-    # usar cualquier producto que todavía no haya visto
     if len(productos_candidatos) == 0:
 
         productos_candidatos = CATALOGO.copy()
@@ -515,6 +634,18 @@ def recomendar_warm_start(customer_id, context, top_k=10):
     X = pd.DataFrame(filas)
 
     # =====================================================
+    # Merge de stats usuario-categoría
+    # =====================================================
+
+    if not USER_CAT_STATS.empty and "customer_id" in X.columns and "category" in X.columns:
+        X["category"] = X["category"].astype(str).str.lower().str.strip()
+        X = X.merge(
+            USER_CAT_STATS,
+            on=["customer_id", "category"],
+            how="left"
+        )
+
+    # =====================================================
     # Codificación de variables categóricas
     # =====================================================
 
@@ -547,30 +678,74 @@ def recomendar_warm_start(customer_id, context, top_k=10):
     )
 
     # =====================================================
-    # Predicción
+    # Escalado de features numéricas de producto
     # =====================================================
-    print("=" * 70)
-    print("CLIENTE:", customer_id)
-    print("USUARIO:")
-    print(usuario)
 
-    print("\nX antes de predecir:")
-    print(X.head())
+    cols_to_scale = [c for c in product_numeric_cols if c in X.columns]
 
-    print("=" * 70)
+    if cols_to_scale:
+        X[cols_to_scale] = scaler_products.transform(X[cols_to_scale])
 
-    scores = modelo.predict_proba(X)[:, 1]
+    # =====================================================
+    # Predicción LightGBM
+    # =====================================================
+
+    scores_lgbm = modelo.predict_proba(X)[:, 1]
+
+    # =====================================================
+    # Content-based similarity (perfil del usuario vs productos)
+    # =====================================================
+
+    perfil = PERFILES_USUARIO.get(customer_id)
+
+    if perfil is not None:
+
+        idx_map = {int(pid): i for i, pid in enumerate(product_ids)}
+
+        vec_indices = [idx_map.get(int(pid)) for pid in ids_productos]
+
+        valid_mask = [i is not None for i in vec_indices]
+        valid_vectors = np.array([
+            product_vectors[vec_indices[i]] for i in range(len(vec_indices)) if valid_mask[i]
+        ])
+
+        if len(valid_vectors) > 0:
+            sims = cosine_similarity(
+                perfil.reshape(1, -1), valid_vectors
+            )[0]
+        else:
+            sims = np.zeros(len(ids_productos))
+
+        content_scores = np.zeros(len(ids_productos))
+        j = 0
+        for i in range(len(ids_productos)):
+            if valid_mask[i]:
+                content_scores[i] = sims[j]
+                j += 1
+
+    else:
+
+        content_scores = np.zeros(len(ids_productos))
+
+    # =====================================================
+    # Blend: LightGBM + Content-Based
+    # =====================================================
+
+    ALPHA = 0.5
+
+    scores_final = ALPHA * scores_lgbm + (1 - ALPHA) * content_scores
 
     resultados = pd.DataFrame({
 
         "product_id": ids_productos,
 
-        "score": scores
+        "score_lgbm": scores_lgbm,
+
+        "score_content": content_scores,
+
+        "score": scores_final
 
     })
-
-    print("Primeros scores:")
-    print(scores[:10])
 
     # =====================================================
     # Agregar información del catálogo
@@ -593,17 +768,13 @@ def recomendar_warm_start(customer_id, context, top_k=10):
 
     )
 
-    resultados = resultados.sort_values(
+    resultados = resultados.sort_values("score", ascending=False).head(top_k)
 
-        "score",
-
-        ascending=False
-
-    ).head(top_k)
+    seleccionados = [fila for _, fila in resultados.iterrows()]
 
     recomendaciones = []
 
-    for _, fila in resultados.iterrows():
+    for fila in seleccionados:
 
         recomendaciones.append({
 
@@ -617,7 +788,7 @@ def recomendar_warm_start(customer_id, context, top_k=10):
 
             "score": round(float(fila["score"]), 4),
 
-            "reason": "Recommended by LightGBM"
+            "reason": "Recommended by LightGBM + Content-Based"
 
         })
 
@@ -629,9 +800,6 @@ def recomendar_warm_start(customer_id, context, top_k=10):
 @app.post("/recommend")
 def recommend(request: RecommendationRequest):
 
-    print("CLIENTE:", request.customer_id)
-    print("CONTEXTO RECIBIDO:", request.context)
-    
     """
     Genera recomendaciones personalizadas.
 
@@ -639,7 +807,7 @@ def recommend(request: RecommendationRequest):
         -> Warm Start (LightGBM)
 
     Si no existe:
-        -> Cold Start (Content-Based)
+        -> Cold Start (Content-Based o Demographic)
     """
 
     try:
@@ -680,21 +848,51 @@ def recommend(request: RecommendationRequest):
         # Usuario nuevo
         # ---------------------------------------
 
-        recomendaciones = recomendar_cold_start(
+        contexto_demografico = {}
 
-            request.customer_id,
+        if request.age is not None:
 
-            request.context,
+            contexto_demografico["age"] = request.age
 
-            top_k=10
+        if request.country is not None:
 
-        )
+            contexto_demografico["country"] = request.country
+
+        if request.context.get("category"):
+
+            contexto_demografico["category"] = request.context["category"]
+
+        if contexto_demografico.get("age") and contexto_demografico.get("country"):
+
+            recomendaciones = recomendar_cold_start_demographic(
+
+                contexto_demografico,
+
+                top_k=10
+
+            )
+
+            modelo_usado = "Cold Start (Demographic Collaborative Filtering)"
+
+        else:
+
+            recomendaciones = recomendar_cold_start(
+
+                request.customer_id,
+
+                request.context,
+
+                top_k=10
+
+            )
+
+            modelo_usado = "Cold Start (Content Based)"
 
         return {
 
             "customer_id": request.customer_id,
 
-            "modelo": "Cold Start (Content Based)",
+            "modelo": modelo_usado,
 
             "usuario_con_historial": False,
 
